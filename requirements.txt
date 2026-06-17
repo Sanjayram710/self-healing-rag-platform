@@ -14,3 +14,5 @@ pytesseract
 pdf2image
 Pillow
 duckduckgo-search
+python-pptx
+openpyxl
