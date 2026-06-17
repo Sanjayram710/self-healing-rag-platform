@@ -1,9 +1,12 @@
 node_modules/
 dist/
+.pnpm-store/
+uploads/
+chroma_db/
 __pycache__/
 .env
-venv/
+*.json
+!package*.json
+data/*.pdf
 chroma_db/
-.firebase/
-*.pyc
-backend/*.json
+.pnpm-store/
