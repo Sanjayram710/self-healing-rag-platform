@@ -5,8 +5,7 @@ langchain
 langgraph
 langchain-community
 langchain-groq
-chromadb
-sentence-transformers
+chromadb    
 pypdf
 python-multipart
 python-dotenv
