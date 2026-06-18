@@ -1,13 +1,11 @@
 from langchain_community.vectorstores import Chroma
-from langchain_openai import OpenAIEmbeddings
-import os
+from langchain_huggingface import HuggingFaceEmbeddings
 
 DB_PATH = "chroma_db"
 
 def get_vectorstore():
-    embedding_model = OpenAIEmbeddings(
-        model="text-embedding-3-small",
-        api_key=os.getenv("OPENAI_API_KEY")
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
     return Chroma(
