@@ -6,9 +6,9 @@ DB_PATH = "chroma_db"
 
 def get_vectorstore():
     embedding_model = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=os.getenv("GOOGLE_API_KEY")
-    )
+    model="models/embedding-001",
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+)
 
     return Chroma(
         persist_directory=DB_PATH,
