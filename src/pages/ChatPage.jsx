@@ -344,13 +344,20 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
                   <div className="px-5 py-5">
                     <p className="whitespace-pre-wrap text-sm leading-7 text-[#38302C]">{message.text}</p>
                     {message.sources && message.sources.length > 0 && (
-                      <div className="mt-5 border-t border-line pt-4">
-                        <p className="mb-3 text-sm font-semibold uppercase tracking-[0.12em] text-[#A18478]">Sources</p>
-                        <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="mt-3 border-t border-line pt-2.5">
+                        <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.15em] text-[#A18478]">Sources</p>
+                        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                           {message.sources.map((source, index) => (
-                            <div key={`${source.filename || source.name || source.source || index}`} className="rounded-md border border-line bg-ivory p-3">
-                              <p className="truncate text-xs font-black">{source.filename || source.name || source.source || `Source ${index + 1}`}</p>
-                              <p className="mt-1 text-[11px] text-muted">{source.page ? `Page ${source.page}` : "Retrieved context"}</p>
+                            <div
+                              key={`${source.filename || source.name || source.source || index}`}
+                              className="flex min-h-0 max-h-[64px] items-center gap-2 overflow-hidden rounded border border-line bg-[#F9F6F3] px-2.5 py-1.5"
+                              title={source.filename || source.name || source.source || `Source ${index + 1}`}
+                            >
+                              <FileText size={13} className="shrink-0 text-[#A18478]" />
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-[11px] font-bold leading-tight text-[#38302C]">{source.filename || source.name || source.source || `Source ${index + 1}`}</p>
+                                <p className="mt-0.5 truncate text-[10px] leading-tight text-muted">{source.page ? `pg. ${source.page}` : "Retrieved context"}</p>
+                              </div>
                             </div>
                           ))}
                         </div>
