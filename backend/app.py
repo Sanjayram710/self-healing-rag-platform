@@ -2,6 +2,9 @@ import asyncio
 import json
 import logging
 import os
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
 import shutil
 from datetime import datetime
 
