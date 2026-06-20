@@ -35,6 +35,7 @@ export default function AnalyticsPage({ documentsCount }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [dateRange, setDateRange] = useState("7d");
+  const [customRange, setCustomRange] = useState({ start: "", end: "" });
   const [exportOpen, setExportOpen] = useState(false);
   const [liveOpen, setLiveOpen] = useState(false);
   const [retryOpen, setRetryOpen] = useState(false);
@@ -46,7 +47,21 @@ export default function AnalyticsPage({ documentsCount }) {
       setLoading(true);
       setError("");
       try {
-        const data = await fetchAnalytics();
+        // Determine parameters based on selected period
+        let period = dateRange;
+        let start = null;
+        let end = null;
+        if (dateRange === "custom") {
+          // Require both start and end dates before fetching
+          if (!customRange.start || !customRange.end) {
+            // No dates selected yet – skip fetch
+            if (mounted) setLoading(false);
+            return;
+          }
+          start = customRange.start;
+          end = customRange.end;
+        }
+        const data = await fetchAnalytics(period, start, end);
         if (mounted) setAnalytics(data);
       } catch (apiError) {
         if (mounted) setError(apiError.response?.data?.detail || apiError.message || "Unable to load analytics.");
@@ -58,7 +73,7 @@ export default function AnalyticsPage({ documentsCount }) {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [dateRange, customRange]);
 
   useEffect(() => {
     if (!liveOpen) return undefined;
@@ -139,13 +154,20 @@ export default function AnalyticsPage({ documentsCount }) {
                   <button
                     key={range}
                     type="button"
-                    onClick={() => setDateRange(range)}
-                    className={`rounded px-3 py-2 text-xs font-black ${dateRange === range ? "bg-accent text-white" : "text-[#6A4034]"}`}
+                    onClick={() => setDateRange(range.toLowerCase())}
+                    className={`rounded px-3 py-2 text-xs font-black ${dateRange === range.toLowerCase() ? "bg-accent text-white" : "text-[#6A4034]"}`}
                   >
                     {range}
                   </button>
                 ))}
               </div>
+              {dateRange === "custom" && (
+                <div className="flex items-center gap-2 rounded-md border border-line bg-paper px-3 py-2">
+                  <input type="date" className="bg-transparent text-xs font-bold" onChange={(e) => setCustomRange((p) => ({ ...p, start: e.target.value }))} />
+                  <span className="text-muted">-</span>
+                  <input type="date" className="bg-transparent text-xs font-bold" onChange={(e) => setCustomRange((p) => ({ ...p, end: e.target.value }))} />
+                </div>
+              )}
               <div className="relative">
                 <button type="button" onClick={() => setExportOpen(!exportOpen)} className="rounded-md bg-paper px-5 py-3 text-sm font-bold text-ink">
                   <Download className="mr-2 inline" size={15} />
