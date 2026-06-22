@@ -82,6 +82,26 @@ def get_user_chats(user_id):
     return sorted(chats, key=lambda x: x.get("updated_at", ""), reverse=True)
 
 
+def update_chat(chat_id: str, user_id: str, title: str | None = None, pinned: bool | None = None) -> bool:
+    """Update chat metadata such as title or pinned flag.
+    Returns True if chat was found and updated.
+    """
+    chats = load_chats()
+    updated = False
+    for chat in chats:
+        if chat.get("chat_id") == chat_id and chat.get("user_id") == user_id:
+            if title is not None:
+                chat["title"] = title
+            if pinned is not None:
+                chat["pinned"] = pinned
+            chat["updated_at"] = datetime.utcnow().isoformat()
+            updated = True
+            break
+    if updated:
+        save_chats(chats)
+    return updated
+
+
 def create_chat(user_id, title="New Chat"):
     chats = load_chats()
     chat = {
@@ -89,6 +109,7 @@ def create_chat(user_id, title="New Chat"):
         "user_id": user_id,
         "title": title,
         "messages": [],
+        "pinned": False,
         "updated_at": datetime.utcnow().isoformat(),
     }
     chats.append(chat)
@@ -114,7 +135,11 @@ def append_message(chat_id, user_id, message):
     return None
 
 
-def delete_chat(chat_id, user_id):
+def search_chats(user_id: str, query: str) -> list:
+    """Search chats by title substring for a given user."""
+    lower_q = query.lower()
+    return [c for c in get_user_chats(user_id) if lower_q in c.get("title", "").lower()]
+
     chats = load_chats()
     next_chats = [
         chat for chat in chats
