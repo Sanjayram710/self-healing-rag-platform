@@ -45,7 +45,7 @@ def save_stats(stats):
 def append_query_log(entry):
     stats = load_stats()
     next_entry = dict(entry)
-    next_entry.setdefault("timestamp", datetime.utcnow().isoformat())
+    next_entry.setdefault("timestamp", datetime.now().isoformat())
     stats.setdefault("queries", []).append(next_entry)
     save_stats(stats)
     return stats
@@ -76,7 +76,8 @@ def parse_query_timestamp(timestamp_value):
 
 
 def resolve_analytics_period(selected_range, start_date=None, end_date=None, now=None):
-    now = now or datetime.utcnow()
+    # Use local time so "today" midnight matches how timestamps are stored
+    now = now or datetime.now()
     selected_range = (selected_range or "7d").strip().lower()
 
     if selected_range == "today":
@@ -88,8 +89,8 @@ def resolve_analytics_period(selected_range, start_date=None, end_date=None, now
     elif selected_range == "30d":
         start_dt = (now - timedelta(days=29)).replace(hour=0, minute=0, second=0, microsecond=0)
         end_dt = now
-    elif selected_range == "all":
-        # No filtering: start from earliest possible date
+    elif selected_range in ("all", "*"):
+        # No date filtering — return everything
         start_dt = datetime.min.replace(tzinfo=None)
         end_dt = now
     elif selected_range == "custom":
@@ -110,6 +111,8 @@ def resolve_analytics_period(selected_range, start_date=None, end_date=None, now
         if isinstance(end_date, str) and "T" not in end_date:
             end_dt = datetime.combine(end_dt.date(), time.max)
     else:
+        # Unknown range — default to 7 days
+        logger.warning("Unknown analytics range '%s', defaulting to 7d.", selected_range)
         start_dt = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
         end_dt = now
 

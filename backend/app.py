@@ -289,7 +289,7 @@ def analytics(
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
     try:
-        start_dt, end_dt = resolve_analytics_period(selected_range, start_date, end_date, now=datetime.utcnow())
+        start_dt, end_dt = resolve_analytics_period(selected_range, start_date, end_date)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -354,7 +354,7 @@ def export_analytics(
         if q.get("user", {}).get("uid") == current_user.uid
     ]
     try:
-        start_dt, end_dt = resolve_analytics_period(selected_range, start_date, end_date, now=datetime.utcnow())
+        start_dt, end_dt = resolve_analytics_period(selected_range, start_date, end_date)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -510,7 +510,7 @@ def ask_question(payload: Query, current_user: AuthenticatedUser = Depends(verif
         },
         "collection_id": payload.collection_id,
         "chat_id": payload.chat_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "confidence": result.get("confidence", 0),
         "faithfulness": result.get("faithfulness", 0),
         "relevance": result.get("relevance", 0),
