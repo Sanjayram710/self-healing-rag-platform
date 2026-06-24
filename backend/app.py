@@ -26,6 +26,7 @@ from backend.auth import AuthenticatedUser, verify_firebase_token
 from backend.chat_history_store import create_chat, get_user_chats, get_chat, delete_chat, append_message, update_chat, search_chats
 from backend.collections_store import load_collections, create_collection, delete_collection, find_collection
 from backend.document_store import delete_from_storage, sync_from_storage, upload_to_storage
+from backend.persistence import get_firestore_client
 from backend.settings_store import load_settings, save_settings
 from backend.classification import build_direct_response, classify_query
 import time
@@ -35,7 +36,7 @@ from backend.ingestion.document_loader import load_document
 from backend.ingestion.embeddings import store_documents
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
 META_FILE = os.path.join(BASE_DIR, "data", "documents_meta.json")
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,22 @@ def _save_meta(meta):
     if client:
         doc_ref = client.collection('metadata').document('documents_meta')
         doc_ref.set(meta)
+        return True
+    return False
+
+
+def _index_document_file(file_path, filename, file_meta):
+    documents = load_document(file_path)
+    chunks = chunk_documents(documents)
+
+    for chunk in chunks:
+        chunk.metadata["user_id"] = file_meta.get("user_id")
+        chunk.metadata["filename"] = filename
+        if file_meta.get("collection_id"):
+            chunk.metadata["collection_id"] = file_meta.get("collection_id")
+
+    store_documents(chunks)
+    return documents, chunks
 
 app = FastAPI(title="Self-Healing RAG Platform")
 
@@ -96,12 +113,15 @@ def hydrate_persistent_storage():
         docs = vectorstore.get().get("documents", [])
         if not docs:
             logger.info("Vector store empty; rebuilding from uploaded documents.")
+            meta = _load_meta()
             for fname in os.listdir(UPLOAD_DIR):
                 file_path = os.path.join(UPLOAD_DIR, fname)
                 if os.path.isfile(file_path):
-                    documents = load_document(file_path)
-                    chunks = chunk_documents(documents)
-                    store_documents(chunks)
+                    file_meta = meta.get(fname, {})
+                    if not file_meta:
+                        logger.warning("Skipping %s during vector rebuild because metadata is missing.", fname)
+                        continue
+                    _index_document_file(file_path, fname, file_meta)
     except Exception as e:
         logger.warning("Failed to verify or rebuild vector store: %s", e, exc_info=True)
 
@@ -142,16 +162,20 @@ async def upload_document(
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    upload_to_storage(file.filename)
+
+    if not upload_to_storage(file.filename):
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=503, detail="Firebase Storage is unavailable. Document was not persisted.")
 
     documents = load_document(file_path)
     chunks = chunk_documents(documents)
-    
+
     for chunk in chunks:
         chunk.metadata["user_id"] = current_user.uid
+        chunk.metadata["filename"] = file.filename
         if collection_id:
             chunk.metadata["collection_id"] = collection_id
-
     store_documents(chunks)
 
     file_size = os.path.getsize(file_path)
@@ -164,9 +188,16 @@ async def upload_document(
         "chunks": len(chunks),
         "collection_id": collection_id,
         "ocr_used": ocr_used,
-        "user_id": current_user.uid
+        "user_id": current_user.uid,
+        "size_bytes": file_size,
+        "uploaded_at": datetime.now().isoformat(),
+        "status": "indexed",
     }
-    _save_meta(meta)
+    if not _save_meta(meta):
+        delete_from_storage(file.filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=503, detail="Firestore is unavailable. Document metadata was not persisted.")
 
     return {
         "message": "Document uploaded and indexed successfully",
@@ -207,7 +238,7 @@ def get_documents(current_user: AuthenticatedUser = Depends(verify_firebase_toke
             "pages": file_meta.get("pages", 0),
             "chunks": file_meta.get("chunks", 0),
             "status": file_meta.get("status", "indexed"),
-            "uploaded_at": datetime.fromtimestamp(os.path.getctime(file_path)).strftime("%Y-%m-%d %H:%M:%S")
+            "uploaded_at": file_meta.get("uploaded_at") or datetime.fromtimestamp(os.path.getctime(file_path)).strftime("%Y-%m-%d %H:%M:%S")
         })
 
     return {
@@ -232,11 +263,13 @@ def delete_document(
         return {"error": "File not found"}
 
     os.remove(file_path)
-    delete_from_storage(filename)
+    if not delete_from_storage(filename):
+        logger.warning("Could not delete %s from Firebase Storage.", filename)
     meta = _load_meta()
     if filename in meta:
         del meta[filename]
-        _save_meta(meta)
+        if not _save_meta(meta):
+            raise HTTPException(status_code=503, detail="Firestore is unavailable. Document metadata was not updated.")
 
     return {"message": f"{filename} deleted successfully"}
 
@@ -256,9 +289,7 @@ def reindex_document(
     if not os.path.exists(file_path):
         return {"error": "File not found"}
 
-    documents = load_document(file_path)
-    chunks = chunk_documents(documents)
-    store_documents(chunks)
+    documents, chunks = _index_document_file(file_path, filename, file_meta)
 
     meta = _load_meta()
     meta[filename] = {
@@ -266,9 +297,10 @@ def reindex_document(
         "pages": len(documents),
         "chunks": len(chunks),
         "status": "indexed",
-        "reindexed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reindexed_at": datetime.now().isoformat(),
     }
-    _save_meta(meta)
+    if not _save_meta(meta):
+        raise HTTPException(status_code=503, detail="Firestore is unavailable. Document metadata was not updated.")
 
     return {
         "message": f"{filename} re-indexed successfully",
