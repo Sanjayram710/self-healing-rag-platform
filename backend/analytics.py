@@ -146,9 +146,41 @@ def log_analytics_summary(selected_range, total_loaded, total_filtered, data):
     )
 
 
+def _score_value(item, key):
+    try:
+        value = float(item.get(key))
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(100.0, value))
+
+
 def _safe_mean(items, key):
-    values = [float(item.get(key, 0) or 0) for item in items]
+    values = [
+        value
+        for item in items
+        for value in [_score_value(item, key)]
+        if value is not None
+    ]
     return round(mean(values), 2) if values else 0.0
+
+
+def _attempts(item):
+    try:
+        return max(1, int(item.get("attempts", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def is_hallucinated(item):
+    faithfulness = _score_value(item, "faithfulness")
+    grounded = item.get("grounded")
+
+    if grounded is False:
+        return True
+    if grounded is True:
+        return faithfulness is not None and faithfulness < 70
+
+    return faithfulness is not None and faithfulness < 70
 
 
 def build_history(queries, start_dt=None, end_dt=None):
@@ -174,7 +206,8 @@ def build_history(queries, start_dt=None, end_dt=None):
         history.append({
             "date": day.isoformat(),
             "questions": len(day_queries),
-            "retries": sum(1 for item in day_queries if int(item.get("attempts", 1) or 1) > 1),
+            "retries": sum(1 for item in day_queries if _attempts(item) > 1),
+            "hallucinations": sum(1 for item in day_queries if is_hallucinated(item)),
             "average_confidence": _safe_mean(day_queries, "confidence"),
             "average_faithfulness": _safe_mean(day_queries, "faithfulness"),
             "average_relevance": _safe_mean(day_queries, "relevance"),
@@ -195,11 +228,9 @@ def summarize_analytics(
 ):
     queries = stats.get("queries", [])
     total_queries = len(queries)
-    retried_queries = [item for item in queries if int(item.get("attempts", 1) or 1) > 1]
-    hallucinated_queries = [
-        item for item in queries
-        if not bool(item.get("grounded", False)) or float(item.get("faithfulness", 0) or 0) < 70
-    ]
+    retried_queries = [item for item in queries if _attempts(item) > 1]
+    hallucinated_queries = [item for item in queries if is_hallucinated(item)]
+    verified_answers = total_queries - len(hallucinated_queries)
 
     averages = {
         "average_confidence": _safe_mean(queries, "confidence"),
@@ -233,11 +264,14 @@ def summarize_analytics(
         "end_date": end_dt.isoformat() if end_dt else None,
         "total_queries": total_queries,
         "questions_asked": total_queries,
-        "verified_answers": total_queries - len(hallucinated_queries),
+        "verified_answers": verified_answers,
         "failed_answers": len(hallucinated_queries),
+        "retry_count": len(retried_queries),
+        "hallucination_count": len(hallucinated_queries),
+        "reliable_count": verified_answers,
         **averages,
         "hallucination_rate": round((len(hallucinated_queries) / total_queries) * 100, 2) if total_queries else 0.0,
-        "hallucination_prevention_rate": round(((total_queries - len(hallucinated_queries)) / total_queries) * 100, 2) if total_queries else 0.0,
+        "hallucination_prevention_rate": round((verified_answers / total_queries) * 100, 2) if total_queries else 0.0,
         "retry_rate": round((len(retried_queries) / total_queries) * 100, 2) if total_queries else 0.0,
         "history": history,
         "retry_history": [

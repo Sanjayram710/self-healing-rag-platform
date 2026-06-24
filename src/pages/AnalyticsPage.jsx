@@ -35,19 +35,6 @@ export default function AnalyticsPage({ documentsCount }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [dateRange, setDateRange] = useState("today");
-  // ...
-              <div className="flex rounded-md border border-line bg-paper px-3 py-2">
-                {["All", "Today", "7d", "30d", "Custom"].map((range) => (
-                  <button
-                    key={range}
-                    type="button"
-                    onClick={() => setDateRange(range.toLowerCase())}
-                    className={`rounded px-3 py-2 text-xs font-black ${dateRange === range.toLowerCase() ? "bg-accent text-white" : "text-[#6A4034]"}`}
-                  >
-                    {range}
-                  </button>
-                ))}
-              </div>
   const [customRange, setCustomRange] = useState({ start: "", end: "" });
   const [exportOpen, setExportOpen] = useState(false);
   const [liveOpen, setLiveOpen] = useState(false);
@@ -112,25 +99,28 @@ export default function AnalyticsPage({ documentsCount }) {
   const avgRecall = Number(metrics.average_recall || 0);
   const hallucinationRate = Number(metrics.hallucination_rate || 0);
   const retryRate = Number(metrics.retry_rate || 0);
+  const retryCount = Number(metrics.retry_count || 0);
+  const hallucinationCount = Number(metrics.hallucination_count || 0);
+  const reliableCount = Number(metrics.reliable_count || 0);
   const indexedDocuments = Number(metrics.documents_indexed ?? documentsCount ?? 0);
   const history = metrics.history ?? [];
 
   const overviewChart = useMemo(() => ([
-    { name: "Queries", value: totalQueries },
-    { name: "Confidence", value: avgConfidence },
-    { name: "Faithfulness", value: avgFaithfulness },
-    { name: "Retries", value: retryRate },
-  ]), [totalQueries, avgConfidence, avgFaithfulness, retryRate]);
+    { name: "Total Queries", value: totalQueries },
+    { name: "Retried Queries", value: retryCount },
+    { name: "Reliable Answers", value: reliableCount },
+    { name: "Hallucinations", value: hallucinationCount },
+  ]), [totalQueries, retryCount, reliableCount, hallucinationCount]);
 
   const qualityCards = useMemo(() => ([
-    { label: "Answer Relevance", value: avgRelevance, tone: "text-accent" },
-    { label: "Context Precision", value: avgPrecision, tone: "text-[#6A2A05]" },
-    { label: "Context Recall", value: avgRecall, tone: "text-[#8C5A46]" },
+    { label: "Answer Relevance", value: avgRelevance, tone: "text-accent", dataKey: "average_relevance" },
+    { label: "Context Precision", value: avgPrecision, tone: "text-[#6A2A05]", dataKey: "average_precision" },
+    { label: "Context Recall", value: avgRecall, tone: "text-[#8C5A46]", dataKey: "average_recall" },
   ]), [avgRelevance, avgPrecision, avgRecall]);
 
   const pieData = [
-    { name: "Reliable", value: Math.max(totalQueries - Math.round((hallucinationRate / 100) * totalQueries), 0) },
-    { name: "Hallucination Risk", value: Math.round((hallucinationRate / 100) * totalQueries) },
+    { name: "Reliable", value: reliableCount },
+    { name: "Hallucination Risk", value: hallucinationCount },
   ].filter((item) => item.value > 0);
 
   return (
@@ -150,7 +140,7 @@ export default function AnalyticsPage({ documentsCount }) {
             </div>
             <div className="flex flex-wrap gap-3">
               <div className="flex rounded-md border border-line bg-paper p-1">
-                {["Today", "7d", "30d", "Custom"].map((range) => (
+                {["All", "Today", "7d", "30d", "Custom"].map((range) => (
                   <button
                     key={range}
                     type="button"
@@ -252,7 +242,7 @@ export default function AnalyticsPage({ documentsCount }) {
               <div key={item.label} className="rounded-lg border border-line bg-[#FFFEFC] p-6">
                 <p className="text-sm font-semibold text-[#6A4034]">{item.label}</p>
                 <p className={`mt-2 text-3xl font-black ${item.tone}`}>{pct(item.value)}</p>
-                <Sparkline data={history} dataKey={`average_${item.label.split(" ")[1].toLowerCase()}`} compact />
+                <Sparkline data={history} dataKey={item.dataKey} compact />
               </div>
             ))}
           </div>
@@ -334,7 +324,7 @@ export default function AnalyticsPage({ documentsCount }) {
                     <Tooltip cursor={{ fill: "#F8F6F2" }} />
                     <Bar dataKey="value" radius={[3, 3, 0, 0]}>
                       {overviewChart.map((entry) => (
-                        <Cell key={entry.name} fill={entry.name === "Retries" ? "#6A2A05" : "#C84B2F"} />
+                        <Cell key={entry.name} fill={entry.name === "Hallucinations" ? "#6A2A05" : "#C84B2F"} />
                       ))}
                     </Bar>
                   </BarChart>
