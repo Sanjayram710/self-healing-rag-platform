@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
@@ -23,7 +24,7 @@ from backend.analytics import (
     summarize_analytics,
 )
 from backend.auth import AuthenticatedUser, verify_firebase_token
-from backend.chat_history_store import create_chat, get_user_chats, get_chat, delete_chat, append_message, update_chat, search_chats
+from backend.chat_history_store import ChatPersistenceError, create_chat, get_user_chats, get_chat, delete_chat, append_message, update_chat, search_chats
 from backend.collections_store import load_collections, create_collection, delete_collection, find_collection
 from backend.document_store import delete_from_storage, sync_from_storage, upload_to_storage
 from backend.persistence import get_firestore_client
@@ -557,28 +558,59 @@ def ask_question(payload: Query, current_user: AuthenticatedUser = Depends(verif
     })
 
     if payload.chat_id:
-        append_message(
-            payload.chat_id,
-            current_user.uid,
-            {"type": "question", "text": payload.question, "timestamp": datetime.utcnow().isoformat()},
-            collection_id=payload.collection_id,
-        )
-        append_message(
-            payload.chat_id,
-            current_user.uid,
-            {
-                "type": "answer",
-                "text": result.get("answer", ""),
-                "timestamp": datetime.utcnow().isoformat(),
-                "confidence": result.get("confidence", 0),
-                "grounded": result.get("grounded", False),
-                "status": "verified" if result.get("grounded") else "insufficient_context",
-                "attempts": result.get("attempts", 1),
-                "sources": result.get("sources", []),
-                "searchSource": result.get("search_source", "Documents"),
-            },
-            collection_id=payload.collection_id,
-        )
+        analytics_metadata = {
+            "query_type": result.get("query_type", query_type),
+            "confidence": result.get("confidence", 0),
+            "faithfulness": result.get("faithfulness", 0),
+            "relevance": result.get("relevance", 0),
+            "precision": result.get("precision", 0),
+            "recall": result.get("recall", 0),
+            "grounded": result.get("grounded", False),
+            "status": "verified" if result.get("grounded") else "insufficient_context",
+            "attempts": result.get("attempts", 1),
+            "reason": result.get("reason", ""),
+            "search_source": result.get("search_source", "Documents"),
+        }
+        try:
+            append_message(
+                payload.chat_id,
+                current_user.uid,
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "question",
+                    "text": payload.question,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "collection_id": payload.collection_id,
+                },
+                collection_id=payload.collection_id,
+                analytics=analytics_metadata,
+            )
+            append_message(
+                payload.chat_id,
+                current_user.uid,
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "answer",
+                    "text": result.get("answer", ""),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "confidence": result.get("confidence", 0),
+                    "faithfulness": result.get("faithfulness", 0),
+                    "relevance": result.get("relevance", 0),
+                    "precision": result.get("precision", 0),
+                    "recall": result.get("recall", 0),
+                    "grounded": result.get("grounded", False),
+                    "status": "verified" if result.get("grounded") else "insufficient_context",
+                    "attempts": result.get("attempts", 1),
+                    "reason": result.get("reason", ""),
+                    "sources": result.get("sources", []),
+                    "searchSource": result.get("search_source", "Documents"),
+                    "queryType": result.get("query_type", query_type),
+                },
+                collection_id=payload.collection_id,
+                analytics=analytics_metadata,
+            )
+        except ChatPersistenceError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
 
     return result
 
@@ -590,11 +622,14 @@ def list_chats_endpoint(current_user: AuthenticatedUser = Depends(verify_firebas
 @app.post("/api/chats")
 @app.post("/chats")
 def create_chat_endpoint(payload: ChatCreate, current_user: AuthenticatedUser = Depends(verify_firebase_token)):
-    chat = create_chat(
-        current_user.uid,
-        payload.title,
-        collection_id=payload.collection_id,
-    )
+    try:
+        chat = create_chat(
+            current_user.uid,
+            payload.title,
+            collection_id=payload.collection_id,
+        )
+    except ChatPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     return chat
 
 # Search chats by title
@@ -614,7 +649,10 @@ def get_chat_endpoint(chat_id: str, current_user: AuthenticatedUser = Depends(ve
 @app.delete("/api/chats/{chat_id}")
 @app.delete("/chats/{chat_id}")
 def delete_chat_endpoint(chat_id: str, current_user: AuthenticatedUser = Depends(verify_firebase_token)):
-    deleted = delete_chat(chat_id, current_user.uid)
+    try:
+        deleted = delete_chat(chat_id, current_user.uid)
+    except ChatPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     if not deleted:
         raise HTTPException(status_code=404, detail="Chat not found or not authorized")
     return {"message": "Chat deleted"}
@@ -627,7 +665,10 @@ class ChatUpdate(BaseModel):
 @app.put("/api/chats/{chat_id}")
 @app.put("/chats/{chat_id}")
 def update_chat_endpoint(chat_id: str, payload: ChatUpdate, current_user: AuthenticatedUser = Depends(verify_firebase_token)):
-    updated = update_chat(chat_id, current_user.uid, title=payload.title, pinned=payload.pinned)
+    try:
+        updated = update_chat(chat_id, current_user.uid, title=payload.title, pinned=payload.pinned)
+    except ChatPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     if not updated:
         raise HTTPException(status_code=404, detail="Chat not found or not authorized")
     return {"updated": True}

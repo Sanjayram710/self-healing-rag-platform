@@ -81,6 +81,11 @@ export const fetchChats = async () => {
   return data;
 };
 
+export const searchChats = async (query = "") => {
+  const { data } = await api.get(`/api/chats/search?query=${encodeURIComponent(query)}`);
+  return data;
+};
+
 export const createChat = async (title, collectionId = null) => {
   const { data } = await api.post("/api/chats", { title, collection_id: collectionId });
   return data;
@@ -93,6 +98,11 @@ export const fetchChat = async (id) => {
 
 export const deleteChat = async (id) => {
   const { data } = await api.delete(`/api/chats/${id}`);
+  return data;
+};
+
+export const updateChat = async (id, updates) => {
+  const { data } = await api.put(`/api/chats/${id}`, updates);
   return data;
 };
 

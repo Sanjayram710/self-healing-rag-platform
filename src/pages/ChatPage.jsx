@@ -3,11 +3,16 @@ import {
   BarChart3,
   Bot,
   CheckCircle2,
+  Clock,
   FileText,
+  Folder,
   HelpCircle,
   Loader2,
   LogOut,
   MessageSquare,
+  Pencil,
+  Pin,
+  PinOff,
   Settings,
   Upload,
   SendHorizontal,
@@ -17,7 +22,7 @@ import {
   Plus,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext.jsx";
-import { askQuestion, fetchChats, createChat, fetchChat, deleteChat, fetchCollections, uploadDocument, fetchDocuments } from "../services/api.js";
+import { askQuestion, fetchChats, searchChats, createChat, fetchChat, deleteChat, updateChat, fetchCollections, uploadDocument, fetchDocuments } from "../services/api.js";
 import StatusPill from "../components/StatusPill.jsx";
 
 const workflowBase = [
@@ -41,7 +46,7 @@ const formatChatTimestamp = (timestamp) => {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
-  return `${dateText} • ${timeText}`;
+  return `${dateText} - ${timeText}`;
 };
 
 export default function ChatPage({ currentChatId, setCurrentChatId }) {
@@ -57,6 +62,7 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
   
   const [chats, setChats] = useState([]);
   const [chatsLoading, setChatsLoading] = useState(false);
+  const [chatSearch, setChatSearch] = useState("");
   
   const [collections, setCollections] = useState([]);
   const [selectedCollection, setSelectedCollection] = useState("all");
@@ -95,7 +101,7 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
   const loadChats = async () => {
     setChatsLoading(true);
     try {
-      const data = await fetchChats();
+      const data = chatSearch.trim() ? await searchChats(chatSearch.trim()) : await fetchChats();
       setChats(data.chats || []);
     } catch (err) {
       console.error("Failed to load chats", err);
@@ -103,6 +109,13 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
       setChatsLoading(false);
     }
   };
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      loadChats();
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [chatSearch]);
 
   useEffect(() => {
     if (!currentChatId) {
@@ -129,6 +142,31 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
       }
     } catch (err) {
       console.error("Failed to delete chat", err);
+    }
+  };
+
+  const handleRenameChat = async (chat) => {
+    const nextTitle = window.prompt("Rename chat", chat.title || "New Chat");
+    if (!nextTitle || nextTitle.trim() === chat.title) return;
+    try {
+      await updateChat(chat.chat_id, { title: nextTitle.trim() });
+      setChats((current) => current.map((item) => (
+        item.chat_id === chat.chat_id ? { ...item, title: nextTitle.trim(), updated_at: new Date().toISOString() } : item
+      )));
+    } catch (err) {
+      console.error("Failed to rename chat", err);
+    }
+  };
+
+  const handleTogglePinChat = async (chat) => {
+    try {
+      const pinned = !chat.pinned;
+      await updateChat(chat.chat_id, { pinned });
+      setChats((current) => current.map((item) => (
+        item.chat_id === chat.chat_id ? { ...item, pinned, updated_at: new Date().toISOString() } : item
+      )));
+    } catch (err) {
+      console.error("Failed to pin chat", err);
     }
   };
 
@@ -216,13 +254,19 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
   const today = new Date().toDateString();
   const yesterday = new Date(Date.now() - 86400000).toDateString();
   
-  const groupedChats = chats.reduce((acc, chat) => {
+  const sortedChats = [...chats].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+    return new Date(b.updated_at || 0) - new Date(a.updated_at || 0);
+  });
+
+  const groupedChats = sortedChats.reduce((acc, chat) => {
       const chatDate = new Date(chat.updated_at).toDateString();
-      if (chatDate === today) acc.today.push(chat);
+      if (chat.pinned) acc.pinned.push(chat);
+      else if (chatDate === today) acc.today.push(chat);
       else if (chatDate === yesterday) acc.yesterday.push(chat);
       else acc.older.push(chat);
       return acc;
-  }, { today: [], yesterday: [], older: [] });
+  }, { pinned: [], today: [], yesterday: [], older: [] });
 
   return (
     <div className="relative">
@@ -254,6 +298,15 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
               onChange={handleFileChange}
             />
         </div>
+        <div className="px-5 pb-3">
+          <input
+            value={chatSearch}
+            onChange={(event) => setChatSearch(event.target.value)}
+            className="w-full rounded-md border border-line bg-[#FFFEFC] px-3 py-2 text-xs font-semibold text-[#594A42] outline-none focus:border-accent"
+            placeholder="Search chats..."
+            aria-label="Search chats"
+          />
+        </div>
         <div className="flex-1 overflow-y-auto px-5 pb-5 space-y-6">
            {chatsLoading ? (
              <p className="text-sm text-muted">Loading chats...</p>
@@ -261,6 +314,25 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
              <p className="text-sm text-muted">No recent chats.</p>
            ) : (
              <>
+               {groupedChats.pinned.length > 0 && (
+                   <div>
+                       <p className="mb-2 text-xs font-bold text-[#A18478]">Pinned</p>
+                       <div className="space-y-1">
+                           {groupedChats.pinned.map((chat) => (
+                               <ChatHistoryRow
+                                 key={chat.chat_id}
+                                 chat={chat}
+                                 collectionName={collectionNames[chat.collection_id] || "All Collections"}
+                                 isActive={currentChatId === chat.chat_id}
+                                 onSelect={() => setCurrentChatId(chat.chat_id)}
+                                 onRename={(event) => { event.stopPropagation(); handleRenameChat(chat); }}
+                                 onTogglePin={(event) => { event.stopPropagation(); handleTogglePinChat(chat); }}
+                                 onDelete={(event) => { event.stopPropagation(); handleDeleteChat(chat.chat_id); }}
+                               />
+                           ))}
+                       </div>
+                   </div>
+               )}
                {groupedChats.today.length > 0 && (
                    <div>
                        <p className="mb-2 text-xs font-bold text-[#A18478]">Today</p>
@@ -272,6 +344,8 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
                                  collectionName={collectionNames[chat.collection_id] || "All Collections"}
                                  isActive={currentChatId === chat.chat_id}
                                  onSelect={() => setCurrentChatId(chat.chat_id)}
+                                 onRename={(event) => { event.stopPropagation(); handleRenameChat(chat); }}
+                                 onTogglePin={(event) => { event.stopPropagation(); handleTogglePinChat(chat); }}
                                  onDelete={(event) => { event.stopPropagation(); handleDeleteChat(chat.chat_id); }}
                                />
                            ))}
@@ -289,6 +363,8 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
                                  collectionName={collectionNames[chat.collection_id] || "All Collections"}
                                  isActive={currentChatId === chat.chat_id}
                                  onSelect={() => setCurrentChatId(chat.chat_id)}
+                                 onRename={(event) => { event.stopPropagation(); handleRenameChat(chat); }}
+                                 onTogglePin={(event) => { event.stopPropagation(); handleTogglePinChat(chat); }}
                                  onDelete={(event) => { event.stopPropagation(); handleDeleteChat(chat.chat_id); }}
                                />
                            ))}
@@ -306,6 +382,8 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
                                  collectionName={collectionNames[chat.collection_id] || "All Collections"}
                                  isActive={currentChatId === chat.chat_id}
                                  onSelect={() => setCurrentChatId(chat.chat_id)}
+                                 onRename={(event) => { event.stopPropagation(); handleRenameChat(chat); }}
+                                 onTogglePin={(event) => { event.stopPropagation(); handleTogglePinChat(chat); }}
                                  onDelete={(event) => { event.stopPropagation(); handleDeleteChat(chat.chat_id); }}
                                />
                            ))}
@@ -482,10 +560,10 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
   );
 }
 
-function ChatHistoryRow({ chat, collectionName, isActive, onSelect, onDelete }) {
+function ChatHistoryRow({ chat, collectionName, isActive, onSelect, onRename, onTogglePin, onDelete }) {
   return (
     <div
-      className={`group relative cursor-pointer rounded-md p-3 pr-9 transition ${isActive ? "border border-line bg-paper" : "hover:bg-paper"}`}
+      className={`group relative cursor-pointer rounded-md p-3 pr-24 transition ${isActive ? "border border-line bg-paper" : "hover:bg-paper"}`}
       onClick={onSelect}
       role="button"
       tabIndex={0}
@@ -500,18 +578,38 @@ function ChatHistoryRow({ chat, collectionName, isActive, onSelect, onDelete }) 
         <MessageSquare size={16} className={`mt-0.5 shrink-0 ${isActive ? "text-accent" : "text-muted"}`} />
         <div className="min-w-0 flex-1">
           <p className={`truncate text-sm font-semibold ${isActive ? "text-ink" : "text-[#594A42]"}`}>{chat.title}</p>
-          <p className="mt-1 truncate text-[11px] font-semibold text-[#6A4034]">📂 {collectionName}</p>
-          <p className="mt-0.5 truncate text-[11px] font-semibold text-muted">🕒 {formatChatTimestamp(chat.updated_at || chat.created_at)}</p>
+          <p className="mt-1 flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold text-[#6A4034]"><Folder size={11} className="shrink-0" /><span className="truncate">{collectionName}</span></p>
+          <p className="mt-0.5 flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold text-muted"><Clock size={11} className="shrink-0" /><span className="truncate">{formatChatTimestamp(chat.updated_at || chat.created_at)}</span></p>
         </div>
       </div>
-      <button
-        type="button"
-        onClick={onDelete}
-        className="absolute right-3 top-3 text-muted opacity-0 transition hover:text-red-600 group-hover:opacity-100 focus:opacity-100"
-        aria-label={`Delete ${chat.title}`}
-      >
-        <Trash2 size={14} />
-      </button>
+      <div className="absolute right-3 top-3 flex items-center gap-2 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+        <button
+          type="button"
+          onClick={onTogglePin}
+          className="text-muted transition hover:text-accent"
+          aria-label={chat.pinned ? `Unpin ${chat.title}` : `Pin ${chat.title}`}
+        >
+          {chat.pinned ? <PinOff size={14} /> : <Pin size={14} />}
+        </button>
+        <button
+          type="button"
+          onClick={onRename}
+          className="text-muted transition hover:text-accent"
+          aria-label={`Rename ${chat.title}`}
+        >
+          <Pencil size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          className="text-muted transition hover:text-red-600"
+          aria-label={`Delete ${chat.title}`}
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
     </div>
   );
 }
+
+
