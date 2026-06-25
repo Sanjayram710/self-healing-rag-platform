@@ -61,16 +61,47 @@ export const fetchAnalytics = async (range = "7d", startDate = null, endDate = n
   return data;
 };
 
-export const exportAnalytics = async (format, range = "7d", startDate = null, endDate = null) => {
+export const exportAnalytics = async (format = "json", range = "7d", startDate = null, endDate = null) => {
   let url = `/api/analytics/export?format=${encodeURIComponent(format)}&range=${encodeURIComponent(range)}`;
   if (range === "custom" && startDate && endDate) {
     url += `&start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`;
   }
   console.info("[Analytics Export Request]", { format, range, startDate, endDate, url });
-  const response = await api.get(url, {
-    responseType: "blob",
-  });
-  return response.data; // already a Blob
+
+  let response;
+  try {
+    response = await api.get(url, { responseType: "blob" });
+  } catch (err) {
+    // axios wraps non-2xx responses as errors even with responseType blob.
+    // Try to read the blob body as JSON to extract the server detail message.
+    const errorBlob = err?.response?.data;
+    if (errorBlob instanceof Blob) {
+      try {
+        const text = await errorBlob.text();
+        const parsed = JSON.parse(text);
+        const detail = parsed?.detail || text;
+        console.error("[Analytics Export Error]", { status: err.response?.status, detail });
+        throw new Error(detail);
+      } catch (parseErr) {
+        if (parseErr instanceof SyntaxError) {
+          // blob was not JSON
+          console.error("[Analytics Export Error] Non-JSON error body", err);
+          throw new Error(`Export failed (HTTP ${err.response?.status ?? "unknown"}).`);
+        }
+        throw parseErr;
+      }
+    }
+    console.error("[Analytics Export Error]", err);
+    throw new Error(err?.message || "Export request failed.");
+  }
+
+  if (!response.data || response.data.size === 0) {
+    console.error("[Analytics Export Error] Empty response body");
+    throw new Error("Server returned an empty file. Please try again.");
+  }
+
+  console.info("[Analytics Export Success]", { format, size: response.data.size });
+  return response.data; // Blob
 };
 
 

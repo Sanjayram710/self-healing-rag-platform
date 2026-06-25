@@ -362,141 +362,293 @@ def analytics(
 @app.get("/api/analytics/export")
 @app.get("/analytics/export")
 def export_analytics(
-    format: str = "csv",
+    format: str = "json",
     selected_range: str = QueryParam(default="7d", alias="range"),
     start_date: str | None = QueryParam(default=None, alias="start_date"),
     end_date: str | None = QueryParam(default=None, alias="end_date"),
     current_user: AuthenticatedUser = Depends(verify_firebase_token),
 ):
-    """Export analytics data as CSV or JSON for download.
-    Default format is CSV. Use `format=json` for JSON output.
+    """Export analytics data as JSON or PDF for download.
+    Default format is JSON. Use `format=pdf` for PDF output.
+    Includes: total queries, confidence metrics, faithfulness metrics,
+    hallucination rate, retry statistics, date range, and charts summary.
     """
+    fmt = format.lower().strip()
+    if fmt not in ("json", "pdf"):
+        logger.warning("[Export] Unsupported format requested: %s by user %s", fmt, current_user.uid)
+        raise HTTPException(status_code=400, detail=f"Unsupported format '{fmt}'. Supported formats: json, pdf")
+
+    logger.info("[Export] Request received — format=%s range=%s user=%s", fmt, selected_range, current_user.uid)
+
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    total_documents = len([
-        fname for fname in os.listdir(UPLOAD_DIR)
-        if os.path.isfile(os.path.join(UPLOAD_DIR, fname))
-    ])
-    total_size_bytes = sum(
-        os.path.getsize(os.path.join(UPLOAD_DIR, fname))
-        for fname in os.listdir(UPLOAD_DIR)
-        if os.path.isfile(os.path.join(UPLOAD_DIR, fname))
-    )
+    try:
+        total_documents = len([
+            fname for fname in os.listdir(UPLOAD_DIR)
+            if os.path.isfile(os.path.join(UPLOAD_DIR, fname))
+        ])
+        total_size_bytes = sum(
+            os.path.getsize(os.path.join(UPLOAD_DIR, fname))
+            for fname in os.listdir(UPLOAD_DIR)
+            if os.path.isfile(os.path.join(UPLOAD_DIR, fname))
+        )
+    except Exception as exc:
+        logger.error("[Export] Failed to read upload directory: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to read document storage.")
+
     vector_store_mb = round(total_size_bytes / (1024 * 1024), 2)
-    stats = load_stats()
+
+    try:
+        stats = load_stats()
+    except Exception as exc:
+        logger.error("[Export] Failed to load analytics stats: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load analytics data.")
+
     user_queries = [
         q for q in stats.get("queries", [])
         if q.get("user", {}).get("uid") == current_user.uid
     ]
+    logger.info("[Export] Total user queries loaded: %s", len(user_queries))
+
     try:
         start_dt, end_dt = resolve_analytics_period(selected_range, start_date, end_date)
     except ValueError as exc:
+        logger.warning("[Export] Invalid date range: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
 
-    logger.info("Analytics range selected: %s", selected_range)
-    logger.info("Analytics records before filtering: %s", len(user_queries))
     filtered_queries = filter_queries_by_timestamp(user_queries, start_dt, end_dt)
-    logger.info("Analytics records after filtering: %s", len(filtered_queries))
+    logger.info("[Export] Queries after date filter: %s", len(filtered_queries))
+
     stats["queries"] = filtered_queries
-    data = summarize_analytics(
-        stats=stats,
-        total_documents=total_documents,
-        vector_store_mb=vector_store_mb,
-        start_dt=start_dt,
-        end_dt=end_dt,
-        selected_range=selected_range,
-    )
-    log_analytics_summary(selected_range, len(user_queries), len(filtered_queries), data)
-    if format.lower() == "json":
-        from fastapi.responses import JSONResponse
-        import json
-        content = json.dumps(data, default=str)
-        return JSONResponse(
-            content=json.loads(content),
+    try:
+        raw_data = summarize_analytics(
+            stats=stats,
+            total_documents=total_documents,
+            vector_store_mb=vector_store_mb,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            selected_range=selected_range,
+        )
+    except Exception as exc:
+        logger.error("[Export] Failed to summarize analytics: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to compute analytics summary.")
+
+    log_analytics_summary(selected_range, len(user_queries), len(filtered_queries), raw_data)
+
+    # Build structured report using build_analytics_report
+    report = build_analytics_report(raw_data)
+    # Enrich report with additional fields required by spec
+    report["documents_indexed"] = total_documents
+    report["vector_store_mb"] = vector_store_mb
+    report["status"] = raw_data.get("status", "healthy")
+    report["generated_at"] = datetime.utcnow().isoformat() + "Z"
+    report["charts_summary"] = {
+        "confidence_trend": [
+            {"date": item.get("date"), "average_confidence": item.get("average_confidence", 0)}
+            for item in raw_data.get("history", [])
+        ],
+        "faithfulness_trend": [
+            {"date": item.get("date"), "average_faithfulness": item.get("average_faithfulness", 0)}
+            for item in raw_data.get("history", [])
+        ],
+        "retry_trend": [
+            {"date": item.get("date"), "retries": item.get("retries", 0)}
+            for item in raw_data.get("history", [])
+        ],
+        "overview": [
+            {"name": "Total Queries", "value": raw_data.get("total_queries", 0)},
+            {"name": "Retried Queries", "value": raw_data.get("retry_count", 0)},
+            {"name": "Reliable Answers", "value": raw_data.get("reliable_count", 0)},
+            {"name": "Hallucinations", "value": raw_data.get("hallucination_count", 0)},
+        ],
+    }
+
+    # ── JSON export ────────────────────────────────────────────────────────────
+    if fmt == "json":
+        try:
+            import json as _json
+            content_str = _json.dumps(report, default=str, indent=2)
+        except Exception as exc:
+            logger.error("[Export] JSON serialisation failed: %s", exc, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to serialise report as JSON.")
+
+        logger.info("[Export] JSON export successful for user %s", current_user.uid)
+        return StreamingResponse(
+            iter([content_str.encode("utf-8")]),
+            media_type="application/json",
             headers={"Content-Disposition": "attachment; filename=analytics_report.json"},
         )
 
-    if format.lower() == "csv":
-        import io, csv
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["metric", "value"])
-        writer.writerow(["total_documents", total_documents])
-        writer.writerow(["vector_store_mb", vector_store_mb])
-        for key, value in data.items():
-            if isinstance(value, (int, float, str, bool)):
-                writer.writerow([key, value])
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=analytics_report.csv"},
-        )
-
-    if format.lower() == "pdf":
+    # ── PDF export ─────────────────────────────────────────────────────────────
+    if fmt == "pdf":
         try:
             from reportlab.lib.pagesizes import letter
             from reportlab.lib import colors
             from reportlab.pdfgen import canvas as rl_canvas
-        except ImportError:
-            raise HTTPException(status_code=500, detail="ReportLab not installed.")
-        import io
-        buffer = io.BytesIO()
-        c = rl_canvas.Canvas(buffer, pagesize=letter)
-        page_width, page_height = letter
-        y = page_height - 60
+        except ImportError as exc:
+            logger.error("[Export] ReportLab not installed: %s", exc)
+            raise HTTPException(status_code=500, detail="PDF generation library (reportlab) is not installed.")
 
-        # Header bar
-        c.setFillColor(colors.HexColor("#C84B2F"))
-        c.rect(0, page_height - 80, page_width, 80, fill=1, stroke=0)
-        c.setFillColor(colors.white)
-        c.setFont("Helvetica-Bold", 20)
-        c.drawString(50, page_height - 52, "Self-Healing RAG  —  Analytics Report")
-        c.setFont("Helvetica", 10)
-        from datetime import datetime
-        c.drawString(50, page_height - 68, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+        try:
+            import io as _io
+            buffer = _io.BytesIO()
+            c = rl_canvas.Canvas(buffer, pagesize=letter)
+            page_width, page_height = letter
 
-        y = page_height - 110
-        c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(50, y, f"Total Documents: {total_documents}")
-        y -= 20
-        c.drawString(50, y, f"Vector Store Size: {vector_store_mb} MB")
-        y -= 30
+            def _new_page_if_needed(y_pos, min_y=80):
+                if y_pos < min_y:
+                    c.showPage()
+                    return page_height - 60
+                return y_pos
 
-        c.setFont("Helvetica-Bold", 11)
-        c.setFillColor(colors.HexColor("#6A2A05"))
-        c.drawString(50, y, "Metrics")
-        y -= 18
-        c.setFont("Helvetica", 10)
-        c.setFillColor(colors.black)
-
-        row_bg = False
-        for key, value in data.items():
-            if not isinstance(value, (int, float, str, bool)):
-                continue
-            if y < 60:
-                c.showPage()
-                y = page_height - 60
-            if row_bg:
-                c.setFillColor(colors.HexColor("#FDF5F2"))
-                c.rect(40, y - 4, page_width - 80, 16, fill=1, stroke=0)
+            def _section_header(y_pos, title):
+                y_pos = _new_page_if_needed(y_pos, 120)
+                c.setFillColor(colors.HexColor("#F5DFD2"))
+                c.rect(40, y_pos - 6, page_width - 80, 22, fill=1, stroke=0)
+                c.setFillColor(colors.HexColor("#6A2A05"))
+                c.setFont("Helvetica-Bold", 11)
+                c.drawString(50, y_pos + 4, title)
                 c.setFillColor(colors.black)
-            row_bg = not row_bg
-            label = key.replace("_", " ").title()
-            c.drawString(55, y, label)
-            c.drawRightString(page_width - 50, y, str(value))
-            y -= 18
+                c.setFont("Helvetica", 10)
+                return y_pos - 26
 
-        c.save()
-        buffer.seek(0)
-        pdf_bytes = buffer.getvalue()
+            def _kv_row(y_pos, label, value, row_bg=False):
+                y_pos = _new_page_if_needed(y_pos)
+                if row_bg:
+                    c.setFillColor(colors.HexColor("#FDF5F2"))
+                    c.rect(40, y_pos - 4, page_width - 80, 16, fill=1, stroke=0)
+                    c.setFillColor(colors.black)
+                c.setFont("Helvetica", 10)
+                c.drawString(55, y_pos, str(label))
+                c.drawRightString(page_width - 50, y_pos, str(value))
+                return y_pos - 18
+
+            # ── Cover header ───────────────────────────────────────────────────
+            c.setFillColor(colors.HexColor("#C84B2F"))
+            c.rect(0, page_height - 90, page_width, 90, fill=1, stroke=0)
+            c.setFillColor(colors.white)
+            c.setFont("Helvetica-Bold", 22)
+            c.drawString(50, page_height - 48, "Self-Healing RAG Platform")
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(50, page_height - 68, "Analytics Report")
+            c.setFont("Helvetica", 10)
+            c.drawString(50, page_height - 84, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+
+            y = page_height - 110
+
+            # ── Date Range ────────────────────────────────────────────────────
+            y = _section_header(y, "Date Range")
+            date_range = report.get("date_range", {})
+            row_bg = False
+            for lbl, val in [
+                ("Range", date_range.get("range", selected_range)),
+                ("Start Date", (date_range.get("start_date") or "N/A")[:10]),
+                ("End Date", (date_range.get("end_date") or "N/A")[:10]),
+            ]:
+                y = _kv_row(y, lbl, val, row_bg)
+                row_bg = not row_bg
+            y -= 10
+
+            # ── Summary ───────────────────────────────────────────────────────
+            y = _section_header(y, "Summary")
+            row_bg = False
+            for lbl, val in [
+                ("Total Queries", report.get("total_queries", 0)),
+                ("Documents Indexed", total_documents),
+                ("Vector Store Size (MB)", vector_store_mb),
+                ("System Status", report.get("status", "healthy").title()),
+            ]:
+                y = _kv_row(y, lbl, val, row_bg)
+                row_bg = not row_bg
+            y -= 10
+
+            # ── Confidence Metrics ────────────────────────────────────────────
+            y = _section_header(y, "Confidence Metrics")
+            conf = report.get("confidence_metrics", {})
+            row_bg = False
+            y = _kv_row(y, "Average Confidence", f"{conf.get('average_confidence', 0):.1f}%", row_bg)
+            y -= 10
+
+            # ── Faithfulness Metrics ──────────────────────────────────────────
+            y = _section_header(y, "Faithfulness Metrics")
+            faith = report.get("faithfulness_metrics", {})
+            row_bg = False
+            for lbl, key in [
+                ("Average Faithfulness", "average_faithfulness"),
+                ("Average Relevance", "average_relevance"),
+                ("Average Precision", "average_precision"),
+                ("Average Recall", "average_recall"),
+            ]:
+                y = _kv_row(y, lbl, f"{faith.get(key, 0):.1f}%", row_bg)
+                row_bg = not row_bg
+            y -= 10
+
+            # ── Hallucination Rate ────────────────────────────────────────────
+            y = _section_header(y, "Hallucination Rate")
+            hall = report.get("hallucination_rate", {})
+            row_bg = False
+            for lbl, val in [
+                ("Hallucination Rate", f"{hall.get('rate', 0):.1f}%"),
+                ("Hallucinated Queries", hall.get("count", 0)),
+                ("Reliable Answers", hall.get("reliable_count", 0)),
+            ]:
+                y = _kv_row(y, lbl, val, row_bg)
+                row_bg = not row_bg
+            y -= 10
+
+            # ── Retry Statistics ──────────────────────────────────────────────
+            y = _section_header(y, "Retry Statistics")
+            retry = report.get("retry_statistics", {})
+            row_bg = False
+            for lbl, val in [
+                ("Retry Rate", f"{retry.get('retry_rate', 0):.1f}%"),
+                ("Total Retried Queries", retry.get("retry_count", 0)),
+            ]:
+                y = _kv_row(y, lbl, val, row_bg)
+                row_bg = not row_bg
+            y -= 10
+
+            # ── Charts Summary ────────────────────────────────────────────────
+            charts = report.get("charts_summary", {})
+            overview = charts.get("overview", [])
+            if overview:
+                y = _section_header(y, "Charts Summary — Overview")
+                row_bg = False
+                for item in overview:
+                    y = _kv_row(y, item.get("name", ""), item.get("value", 0), row_bg)
+                    row_bg = not row_bg
+                y -= 10
+
+            # ── Most Queried Documents ────────────────────────────────────────
+            top_docs = report.get("most_queried_documents", [])
+            if top_docs:
+                y = _section_header(y, "Most Queried Documents")
+                row_bg = False
+                for item in top_docs[:10]:
+                    y = _kv_row(y, item.get("document", ""), f"{item.get('queries', 0)} queries", row_bg)
+                    row_bg = not row_bg
+                y -= 10
+
+            # ── Footer ────────────────────────────────────────────────────────
+            c.setFillColor(colors.HexColor("#6A4034"))
+            c.setFont("Helvetica", 8)
+            c.drawCentredString(page_width / 2, 30, "Self-Healing RAG Platform  |  Confidential Analytics Report")
+
+            c.save()
+            buffer.seek(0)
+            pdf_bytes = buffer.getvalue()
+        except Exception as exc:
+            logger.error("[Export] PDF generation failed: %s", exc, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
+
+        logger.info("[Export] PDF export successful for user %s (%d bytes)", current_user.uid, len(pdf_bytes))
         return StreamingResponse(
             iter([pdf_bytes]),
             media_type="application/pdf",
             headers={"Content-Disposition": "attachment; filename=analytics_report.pdf"},
         )
 
-    raise HTTPException(status_code=400, detail="Invalid format. Supported: csv, json, pdf")
+    # Unreachable — guard already checked above
+    raise HTTPException(status_code=400, detail="Invalid format. Supported: json, pdf")
 
 
 class ChatCreate(BaseModel):
