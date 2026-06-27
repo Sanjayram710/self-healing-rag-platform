@@ -9,9 +9,9 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(na
 import shutil
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, Query as QueryParam
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile, Query as QueryParam
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.analytics import (
@@ -468,6 +468,7 @@ def export_analytics(
     start_date: str | None = QueryParam(default=None, alias="start_date"),
     end_date: str | None = QueryParam(default=None, alias="end_date"),
     current_user: AuthenticatedUser = Depends(verify_firebase_token),
+    background_tasks: BackgroundTasks = None,
 ):
     """Export analytics data as JSON or PDF for download.
     Default format is JSON. Use `format=pdf` for PDF output.
@@ -518,6 +519,13 @@ def export_analytics(
 
     filtered_queries = filter_queries_by_timestamp(user_queries, start_dt, end_dt)
     logger.info("[Export] Queries after date filter: %s", len(filtered_queries))
+
+    if not filtered_queries:
+        logger.warning("[Export] No analytics data available for selected period: range=%s", selected_range)
+        raise HTTPException(
+            status_code=400,
+            detail="No analytics data available for the selected period."
+        )
 
     stats["queries"] = filtered_queries
     try:
@@ -589,10 +597,12 @@ def export_analytics(
             logger.error("[Export] ReportLab not installed: %s", exc)
             raise HTTPException(status_code=500, detail="PDF generation library (reportlab) is not installed.")
 
+        import tempfile
         try:
-            import io as _io
-            buffer = _io.BytesIO()
-            c = rl_canvas.Canvas(buffer, pagesize=letter)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_path = tmp_file.name
+
+            c = rl_canvas.Canvas(tmp_path, pagesize=letter)
             page_width, page_height = letter
 
             def _new_page_if_needed(y_pos, min_y=80):
@@ -735,17 +745,32 @@ def export_analytics(
             c.drawCentredString(page_width / 2, 30, "Self-Healing RAG Platform  |  Confidential Analytics Report")
 
             c.save()
-            buffer.seek(0)
-            pdf_bytes = buffer.getvalue()
         except Exception as exc:
             logger.error("[Export] PDF generation failed: %s", exc, exc_info=True)
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
             raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
 
-        logger.info("[Export] PDF export successful for user %s (%d bytes)", current_user.uid, len(pdf_bytes))
-        return StreamingResponse(
-            iter([pdf_bytes]),
+        logger.info("[Export] PDF export successful for user %s. Returning FileResponse.", current_user.uid)
+        
+        def delete_temp_file(path: str):
+            try:
+                os.remove(path)
+                logger.info("[Export] Deleted temporary PDF file: %s", path)
+            except Exception as e:
+                logger.warning("[Export] Failed to delete temporary file %s: %s", path, e)
+
+        if background_tasks:
+            background_tasks.add_task(delete_temp_file, tmp_path)
+
+        return FileResponse(
+            path=tmp_path,
             media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=analytics_report.pdf"},
+            filename="analytics_report.pdf",
+            background=background_tasks
         )
 
     # Unreachable — guard already checked above

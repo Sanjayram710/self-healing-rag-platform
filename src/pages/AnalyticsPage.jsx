@@ -193,7 +193,7 @@ export default function AnalyticsPage({ documentsCount }) {
                             const url = window.URL.createObjectURL(blob);
                             const a = document.createElement("a");
                             a.href = url;
-                            a.download = `analytics_report_${new Date().toISOString().slice(0, 10)}.${format.toLowerCase()}`;
+                             a.download = format.toLowerCase() === "pdf" ? "analytics_report.pdf" : `analytics_report.${format.toLowerCase()}`;
                             document.body.appendChild(a);
                             a.click();
                             a.remove();
