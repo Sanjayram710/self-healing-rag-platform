@@ -150,7 +150,8 @@ def save_chats(chats):
 
 
 def get_user_chats(user_id):
-    chats = sync_chats_from_firestore(user_id) or _local_chats_for_user(user_id)
+    # Fast path: use the local cache that is kept in sync on writes and during startup.
+    chats = _local_chats_for_user(user_id)
     return sorted(
         chats,
         key=lambda x: (bool(x.get("pinned")), x.get("updated_at", "")),

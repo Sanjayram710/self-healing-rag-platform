@@ -1,7 +1,8 @@
-import os
 import json
 import logging
+import os
 import threading
+import time
 from dataclasses import dataclass
 
 import firebase_admin
@@ -42,36 +43,25 @@ _app_lock = threading.Lock()
 
 
 def _get_firebase_app():
-    """Initialise the Firebase Admin SDK exactly once and return the app.
-
-    Credential resolution order:
-      1. FIREBASE_SERVICE_ACCOUNT_JSON env var  (JSON string or file path)
-      2. backend/firebase-admin.json            (fallback file)
-      3. Any *firebase-adminsdk*.json found in the backend/ directory
-      4. Default credentials (last resort)
-
-    The project ID is always set explicitly to avoid
-    ``DefaultCredentialsError`` or missing-project-ID errors.
-    """
+    """Initialise the Firebase Admin SDK exactly once and return the app."""
     with _app_lock:
         try:
             app = firebase_admin.get_app()
-            logger.debug("[Firebase] SDK already initialised — returning existing app.")
+            logger.debug("[Firebase] SDK already initialised - returning existing app.")
             return app
         except ValueError:
             pass
 
-        logger.info("[Firebase] Initialising Firebase Admin SDK …")
+        start = time.perf_counter()
+        logger.info("[Firebase] Initialising Firebase Admin SDK...")
 
         cred = None
         init_path = None
         project_id = "self-healing-rag-a57d9"
 
-        # --- 1. FIREBASE_SERVICE_ACCOUNT_JSON env var -------------------------
         env_val = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
         if env_val:
             if env_val.startswith("{"):
-                # Raw JSON string
                 try:
                     cred = credentials.Certificate(json.loads(env_val))
                     init_path = "env var (inline JSON)"
@@ -79,7 +69,6 @@ def _get_firebase_app():
                 except Exception as exc:
                     logger.error("[Firebase] Failed to parse env var as JSON: %s", exc)
             else:
-                # Treat as a file path
                 if os.path.isfile(env_val):
                     try:
                         cred = credentials.Certificate(env_val)
@@ -90,7 +79,6 @@ def _get_firebase_app():
                 else:
                     logger.warning("[Firebase] Env var file path does not exist: %s", env_val)
 
-        # --- 2. backend/firebase-admin.json fallback --------------------------
         if cred is None:
             backend_dir = os.path.dirname(os.path.abspath(__file__))
             fallback = os.path.join(backend_dir, "firebase-admin.json")
@@ -102,7 +90,6 @@ def _get_firebase_app():
                 except Exception as exc:
                     logger.error("[Firebase] Fallback file failed: %s", exc)
 
-        # --- 3. Auto-detect any firebase-adminsdk JSON in backend/ ------------
         if cred is None:
             backend_dir = os.path.dirname(os.path.abspath(__file__))
             try:
@@ -119,7 +106,6 @@ def _get_firebase_app():
             except Exception as exc:
                 logger.error("[Firebase] Error scanning backend dir: %s", exc)
 
-        # --- Initialise -------------------------------------------------------
         options = {"projectId": project_id}
 
         try:
@@ -127,9 +113,10 @@ def _get_firebase_app():
                 app = firebase_admin.initialize_app(cred, options=options)
                 logger.info("[Firebase] SDK initialised via %s (project=%s).", init_path, project_id)
             else:
-                logger.warning("[Firebase] No credentials found — trying default credentials.")
+                logger.warning("[Firebase] No credentials found - trying default credentials.")
                 app = firebase_admin.initialize_app(options=options)
                 logger.info("[Firebase] SDK initialised with default credentials (project=%s).", project_id)
+            logger.info("[Firebase] Admin SDK init completed in %.2fs", time.perf_counter() - start)
             return app
         except Exception as exc:
             logger.critical("[Firebase] Initialisation FAILED: %s", exc)
@@ -139,6 +126,7 @@ def _get_firebase_app():
 def verify_firebase_token(
     authorization: str | None = Header(default=None),
 ) -> AuthenticatedUser:
+    request_start = time.perf_counter()
 
     if authorization:
         logger.debug("[Auth] Authorization header present (len=%d).", len(authorization))
@@ -148,7 +136,9 @@ def verify_firebase_token(
     token = _extract_bearer_token(authorization)
 
     try:
+        auth_start = time.perf_counter()
         _get_firebase_app()
+        logger.info("[Auth] Firebase app ready in %.2fs", time.perf_counter() - auth_start)
     except Exception as exc:
         logger.error("[Auth] Firebase app init failed: %s", exc)
         raise HTTPException(
@@ -157,8 +147,14 @@ def verify_firebase_token(
         )
 
     try:
+        verify_start = time.perf_counter()
         decoded = auth.verify_id_token(token)
-        logger.info("[Auth] Token verified — uid=%s email=%s", decoded.get("uid"), decoded.get("email"))
+        logger.info(
+            "[Auth] Token verified in %.2fs - uid=%s email=%s",
+            time.perf_counter() - verify_start,
+            decoded.get("uid"),
+            decoded.get("email"),
+        )
     except Exception as exc:
         logger.error("[Auth] Token verification failed: %s", exc, exc_info=True)
         raise HTTPException(
@@ -166,6 +162,7 @@ def verify_firebase_token(
             detail="Invalid or expired Firebase token",
         )
 
+    logger.info("[Auth] Total auth dependency time %.2fs", time.perf_counter() - request_start)
     return AuthenticatedUser(
         uid=str(decoded.get("uid", "")),
         name=str(decoded.get("name", "")),

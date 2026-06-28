@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(na
 import shutil
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, Query as QueryParam
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, Query as QueryParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -42,6 +42,7 @@ from backend.performance_logger import timed_stage
 from backend.ingestion.chunker import chunk_documents
 from backend.ingestion.document_loader import load_document
 from backend.ingestion.embeddings import store_documents
+from backend.vectorstore.chroma import initialize_vectorstore
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
@@ -80,10 +81,25 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def log_request_timing(request: Request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        logger.info(
+            "[Request] %s %s completed in %.2fs",
+            request.method,
+            request.url.path,
+            time.perf_counter() - start,
+        )
+
+
 @app.on_event("startup")
 def hydrate_persistent_storage():
     """
-    Startup hook — runs once when the FastAPI process starts.
+    Startup hook - runs once when the FastAPI process starts.
 
     1. Downloads any uploaded files from Firebase Storage that are not already
        present on the local ephemeral disk.
@@ -91,27 +107,43 @@ def hydrate_persistent_storage():
        it by re-indexing every restored document.
     3. Syncs chat history from Firestore.
     """
-    # Step 1: restore files from Firebase Storage + collect their metadata
-    logger.info("[Startup] Syncing documents from Firebase Storage…")
+    startup_start = time.perf_counter()
+    logger.info("[Startup] Beginning application startup...")
+
+    firebase_start = time.perf_counter()
+    try:
+        get_firestore_client()
+        logger.info("[Startup] Firebase client prewarmed in %.2fs", time.perf_counter() - firebase_start)
+    except Exception:
+        logger.error("[Startup] Firebase client prewarm failed.", exc_info=True)
+
+    vector_start = time.perf_counter()
+    try:
+        initialize_vectorstore()
+        logger.info("[Startup] Vector store prewarmed in %.2fs", time.perf_counter() - vector_start)
+    except Exception:
+        logger.error("[Startup] Vector store prewarm failed.", exc_info=True)
+
+    restore_start = time.perf_counter()
+    logger.info("[Startup] Syncing documents from Firebase Storage...")
     try:
         restored_docs = sync_from_storage()  # list[(filename, meta)]
         logger.info("[Startup] %d documents available locally after sync.", len(restored_docs))
     except Exception:
         logger.error("[Startup] sync_from_storage() failed.", exc_info=True)
         restored_docs = []
+    logger.info("[Startup] Storage sync completed in %.2fs", time.perf_counter() - restore_start)
 
-    # Step 2: rebuild Chroma vector store if empty
     try:
-        from backend.vectorstore.chroma import get_vectorstore
-        vectorstore = get_vectorstore()
+        vectorstore = initialize_vectorstore()
         existing_docs = vectorstore.get().get("documents", [])
         if not existing_docs:
-            logger.info("[Startup] Vector store is empty — rebuilding from %d documents.", len(restored_docs))
+            logger.info("[Startup] Vector store is empty - rebuilding from %d documents.", len(restored_docs))
             indexed = 0
             for filename, file_meta in restored_docs:
                 file_path = os.path.join(UPLOAD_DIR, filename)
                 if not os.path.isfile(file_path):
-                    logger.warning("[Startup] Skipping %s — file not on disk.", filename)
+                    logger.warning("[Startup] Skipping %s - file not on disk.", filename)
                     continue
                 try:
                     _index_document_file(file_path, filename, file_meta)
@@ -119,20 +151,20 @@ def hydrate_persistent_storage():
                     logger.info("[Startup] Indexed %s into vector store.", filename)
                 except Exception:
                     logger.error("[Startup] Failed to index %s.", filename, exc_info=True)
-            logger.info("[Startup] Vector store rebuild complete — %d/%d documents indexed.", indexed, len(restored_docs))
+            logger.info("[Startup] Vector store rebuild complete - %d/%d documents indexed.", indexed, len(restored_docs))
         else:
             logger.info("[Startup] Vector store already populated (%d chunks).", len(existing_docs))
     except Exception:
         logger.error("[Startup] Vector store check/rebuild failed.", exc_info=True)
 
-    # Step 3: sync chat history from Firestore
+    chat_sync_start = time.perf_counter()
     try:
         from backend.chat_history_store import sync_chats_from_firestore
         sync_chats_from_firestore()
     except Exception:
         logger.warning("[Startup] Chat history sync failed.", exc_info=True)
-
-
+    logger.info("[Startup] Chat sync phase completed in %.2fs", time.perf_counter() - chat_sync_start)
+    logger.info("[Startup] Application startup completed in %.2fs", time.perf_counter() - startup_start)
 class Query(BaseModel):
     question: str
     collection_id: str | None = None

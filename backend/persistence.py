@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import threading
+import time
 
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
@@ -9,6 +10,8 @@ from firebase_admin import credentials, firestore, storage
 logger = logging.getLogger(__name__)
 
 _firebase_lock = threading.Lock()
+_firestore_client = None
+_storage_bucket = None
 
 
 def _service_account_payload():
@@ -70,18 +73,30 @@ def get_firebase_app():
 
 
 def get_firestore_client():
+    global _firestore_client
     try:
+        if _firestore_client is not None:
+            return _firestore_client
+        start = time.perf_counter()
         app = get_firebase_app()
-        return firestore.client(app=app)
+        _firestore_client = firestore.client(app=app)
+        logger.info("[Firebase] Firestore client ready in %.2fs", time.perf_counter() - start)
+        return _firestore_client
     except Exception:
         logger.warning("Firestore client unavailable; using local persistence only.", exc_info=True)
         return None
 
 
 def get_storage_bucket():
+    global _storage_bucket
     try:
+        if _storage_bucket is not None:
+            return _storage_bucket
+        start = time.perf_counter()
         app = get_firebase_app()
-        return storage.bucket(app=app)
+        _storage_bucket = storage.bucket(app=app)
+        logger.info("[Firebase] Storage bucket ready in %.2fs", time.perf_counter() - start)
+        return _storage_bucket
     except Exception:
         logger.warning("Firebase Storage unavailable; using local uploads only.", exc_info=True)
         return None
