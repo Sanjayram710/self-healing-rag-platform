@@ -73,6 +73,7 @@ export default function App() {
       <ChatPage
         currentChatId={currentChatId}
         setCurrentChatId={setCurrentChatId}
+        onDocumentUpload={loadDocuments}
       />
     );
   }, [activePage, currentChatId, setCurrentChatId]);

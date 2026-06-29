@@ -25,31 +25,7 @@ import { useAuth } from "../context/AuthContext.jsx";
 import { askQuestion, fetchChats, searchChats, createChat, fetchChat, deleteChat, updateChat, fetchCollections, uploadDocument, fetchDocuments } from "../services/api.js";
 import StatusPill from "../components/StatusPill.jsx";
 
-const workflowBase = [
-  { label: "Question Received", detail: "Timestamp captured", state: "done" },
-  { label: "Vector Retrieval", detail: "ChromaDB semantic search", state: "done" },
-  { label: "Answer Gen", detail: "LLM generation step", state: "done" },
-  { label: "Verification Agent", detail: "Checking hallucination status", state: "active" },
-  { label: "Critic Agent", detail: "Context repair if needed", state: "pending" },
-];
-
-const formatChatTimestamp = (timestamp) => {
-  if (!timestamp) return "No activity yet";
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return "No activity yet";
-  const dateText = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(date);
-  const timeText = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
-  return `${dateText} - ${timeText}`;
-};
-
-export default function ChatPage({ currentChatId, setCurrentChatId }) {
+export default function ChatPage({ currentChatId, setCurrentChatId, onDocumentUpload }) {
   const chatInputRef = useRef(null);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
@@ -59,6 +35,7 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
   const { user, logout } = useAuth();
   const fileInputRef = React.useRef(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null); // null | { stage: 'upload'|'index'|'store', fileName: string }
   
   const [chats, setChats] = useState([]);
   const [chatsLoading, setChatsLoading] = useState(false);
@@ -75,6 +52,53 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
       return acc;
     }, {});
   }, [collections]);
+
+  // Dynamic workflow based on loading state and last response
+  const workflow = useMemo(() => {
+    if (loading) {
+      return [
+        { label: "Question Received", detail: "Timestamp captured", state: "done" },
+        { label: "Vector Retrieval", detail: "ChromaDB semantic search", state: "active" },
+        { label: "Answer Gen", detail: "LLM generation step", state: "pending" },
+        { label: "Verification Agent", detail: "Checking hallucination status", state: "pending" },
+        { label: "Critic Agent", detail: "Context repair if needed", state: "pending" },
+      ];
+    }
+    if (!lastResponse) {
+      return [
+        { label: "Question Received", detail: "Waiting for input", state: "done" },
+        { label: "Vector Retrieval", detail: "ChromaDB semantic search", state: "pending" },
+        { label: "Answer Gen", detail: "LLM generation step", state: "pending" },
+        { label: "Verification Agent", detail: "Checking hallucination status", state: "pending" },
+        { label: "Critic Agent", detail: "Context repair if needed", state: "pending" },
+      ];
+    }
+    const attempts = lastResponse.attempts || 1;
+    const isGrounded = lastResponse.grounded;
+    return [
+      { label: "Question Received", detail: "Timestamp captured", state: "done" },
+      { label: "Vector Retrieval", detail: "ChromaDB semantic search", state: "done" },
+      { label: "Answer Gen", detail: "LLM generation step", state: "done" },
+      { label: "Verification Agent", detail: isGrounded ? "Answer verified" : "Needs review", state: "done" },
+      { label: "Critic Agent", detail: attempts > 1 ? "Context repaired after retry" : "No repair needed", state: "done" },
+    ];
+  }, [loading, lastResponse]);
+
+  const formatChatTimestamp = (timestamp) => {
+    if (!timestamp) return "No activity yet";
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return "No activity yet";
+    const dateText = new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(date);
+    const timeText = new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+    return `${dateText} - ${timeText}`;
+  };
 
   useEffect(() => {
     const handleShortcut = (event) => {
@@ -176,14 +200,22 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
     setError("");
     try {
       for (const file of files) {
+        setUploadStatus({ stage: 'upload', fileName: file.name });
         const result = await uploadDocument(file, selectedCollection === "all" ? null : selectedCollection);
         if (result.error) throw new Error(result.error);
+        setUploadStatus({ stage: 'store', fileName: file.name });
+        // Give a brief moment for the store to settle before refreshing
+        await new Promise(resolve => setTimeout(resolve, 600));
+      }
+      if (onDocumentUpload) {
+        await onDocumentUpload();
       }
     } catch (err) {
       console.error('Upload failed', err);
       setError(err.response?.data?.detail || err.message || "Upload failed.");
     } finally {
       setUploading(false);
+      setTimeout(() => setUploadStatus(null), 2000);
       e.target.value = "";
     }
   };
@@ -299,6 +331,29 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
               style={{ display: 'none' }}
               onChange={handleFileChange}
             />
+            {uploadStatus && (
+              <div className="mt-3 rounded-md border border-line bg-paper p-3">
+                <p className="text-xs font-semibold text-[#6A4034] truncate">{uploadStatus.fileName}</p>
+                <div className="mt-2 grid grid-cols-3 gap-1">
+                  {['Upload', 'Index', 'Store'].map((label, idx) => {
+                    const stageOrder = { upload: 0, index: 1, store: 2 };
+                    const currentIdx = stageOrder[uploadStatus.stage] ?? 0;
+                    const isDone = idx < currentIdx;
+                    const isActive = idx === currentIdx;
+                    return (
+                      <div
+                        key={label}
+                        className={`grid h-8 place-items-center text-[10px] font-black uppercase rounded ${
+                          isActive ? 'bg-accent text-white' : isDone ? 'bg-[#D9C7BC] text-[#6A4034]' : 'bg-[#FFFEFC] text-muted'
+                        }`}
+                      >
+                        {label}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
         </div>
         <div className="px-5 pb-3">
           <input
@@ -533,13 +588,13 @@ export default function ChatPage({ currentChatId, setCurrentChatId }) {
         <p className="text-sm font-semibold uppercase tracking-[0.2em] text-[#A18478]">Live Workflow</p>
         <p className="mt-2 text-xs font-semibold text-[#6A4034]">Self-Healing Cycle Logs</p>
         <div className="mt-8 space-y-5">
-          {workflowBase.map((step, index) => (
+          {workflow.map((step, index) => (
             <div key={step.label} className="flex gap-4">
               <div className="flex flex-col items-center">
                 <span className={`grid h-7 w-7 place-items-center rounded-full border ${step.state === "active" ? "border-accent bg-accent text-white" : "border-line bg-paper text-muted"}`}>
                   {step.state === "done" ? <CheckCircle2 size={14} /> : <Bot size={14} />}
                 </span>
-                {index < workflowBase.length - 1 && <span className="h-8 w-px bg-line" />}
+                {index < workflow.length - 1 && <span className="h-8 w-px bg-line" />}
               </div>
               <div>
                 <p className={`text-sm font-black ${step.state === "active" ? "text-accent" : "text-ink"}`}>{step.label}</p>
